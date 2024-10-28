@@ -23,6 +23,8 @@ void save_pc_state(int PC) {
         exit(1);
     }
     fprintf(fp, "%d\n", PC);
+    fflush(fp);
+    fsync(fileno(fp)); // Garante que os dados foram escritos no disco
     fclose(fp);
 }
 
@@ -59,6 +61,7 @@ void handle_sigusr1(int sig) {
     printf("Processo %d recebendo SIGUSR1, salvando PC=%d e parando.\n", getpid(), PC);
     fflush(stdout);
     save_pc_state(PC);
+    usleep(1000); // Espera 1ms
     kill(getpid(), SIGSTOP);
 }
 
