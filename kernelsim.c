@@ -40,7 +40,7 @@ int dequeue_io() {
 void handle_irq0(int sig) {
     // Handler para simular a interrupção do time slice (IRQ0)
     if (processos_ativos[current_process] == 0 || processos_bloqueados[current_process]) {
-        // Se o processo atual já terminou ou está bloqueado, simplesmente retorne
+        // Se o processo atual já terminou ou está bloqueado, não faz nada
         return;
     }
 
@@ -58,11 +58,17 @@ void handle_irq0(int sig) {
             break;
         }
     }
+
     if (found) {
         current_process = next_process;
-        printf("KernelSim: Ativando processo %d com SIGCONT.\n", processos[current_process]);
-        fflush(stdout);
-        kill(processos[current_process], SIGCONT);
+        if (processos_ativos[current_process]) {
+            printf("KernelSim: Ativando processo %d com SIGCONT.\n", processos[current_process]);
+            fflush(stdout);
+            kill(processos[current_process], SIGCONT);
+        } else {
+            printf("KernelSim: Processo %d já terminou. Não será ativado.\n", processos[current_process]);
+            fflush(stdout);
+        }
     } else {
         printf("KernelSim: Nenhum processo disponível para executar.\n");
         fflush(stdout);
@@ -73,9 +79,14 @@ void handle_irq1(int sig) {
     // Handler para simular a interrupção de I/O completado (IRQ1)
     int index = dequeue_io();
     if (index != -1) {
-        processos_bloqueados[index] = 0;
-        printf("KernelSim: I/O completado. Desbloqueando processo %d.\n", processos[index]);
-        fflush(stdout);
+        if (processos_ativos[index]) {
+            processos_bloqueados[index] = 0;
+            printf("KernelSim: I/O completado. Desbloqueando processo %d.\n", processos[index]);
+            fflush(stdout);
+        } else {
+            printf("KernelSim: Processo %d já terminou. Não pode ser desbloqueado.\n", processos[index]);
+            fflush(stdout);
+        }
     } else {
         printf("KernelSim: Nenhum processo aguardando I/O.\n");
         fflush(stdout);
@@ -85,19 +96,28 @@ void handle_irq1(int sig) {
 void handle_syscall(int sig, siginfo_t *siginfo, void *context) {
     // Handler para lidar com a "syscall" de I/O feita pelos processos
     pid_t pid = siginfo->si_pid;
-    printf("KernelSim: Processo %d solicitou I/O, marcando como bloqueado.\n", pid);
-    fflush(stdout);
 
     // Encontrar o índice do processo que fez a syscall
     int index = -1;
     for (int i = 0; i < NUM_PROCESSES; i++) {
         if (processos[i] == pid) {
-            processos_bloqueados[i] = 1;
-            enqueue_io(i); // Adicionar à fila de I/O
             index = i;
             break;
         }
     }
+
+    if (index == -1 || processos_ativos[index] == 0) {
+        // Processo não encontrado ou já terminado
+        printf("KernelSim: Processo %d não encontrado ou já terminado. Ignorando syscall.\n", pid);
+        fflush(stdout);
+        return;
+    }
+
+    processos_bloqueados[index] = 1;
+    enqueue_io(index); // Adicionar à fila de I/O
+
+    printf("KernelSim: Processo %d solicitou I/O, marcando como bloqueado.\n", pid);
+    fflush(stdout);
 
     // Enviar SIGUSR1 para o processo para que ele salve seu estado e pare
     kill(pid, SIGUSR1);
@@ -114,9 +134,14 @@ void handle_syscall(int sig, siginfo_t *siginfo, void *context) {
     }
     if (found) {
         current_process = next_process;
-        printf("KernelSim: Ativando processo %d com SIGCONT.\n", processos[current_process]);
-        fflush(stdout);
-        kill(processos[current_process], SIGCONT);
+        if (processos_ativos[current_process]) {
+            printf("KernelSim: Ativando processo %d com SIGCONT.\n", processos[current_process]);
+            fflush(stdout);
+            kill(processos[current_process], SIGCONT);
+        } else {
+            printf("KernelSim: Processo %d já terminou. Não será ativado.\n", processos[current_process]);
+            fflush(stdout);
+        }
     } else {
         printf("KernelSim: Nenhum processo disponível para executar.\n");
         fflush(stdout);
@@ -131,8 +156,41 @@ void handle_sigchld(int sig) {
         for (int i = 0; i < NUM_PROCESSES; i++) {
             if (processos[i] == pid) {
                 processos_ativos[i] = 0;
+                processos_bloqueados[i] = 0; // Certifique-se de que o processo não esteja bloqueado
                 printf("KernelSim: Processo %d terminou. Marcando como inativo.\n", pid);
                 fflush(stdout);
+
+                // Atualizar o current_process se ele apontar para o processo terminado
+                if (current_process == i) {
+                    // Encontrar o próximo processo ativo
+                    int found = 0;
+                    for (int j = 0; j < NUM_PROCESSES; j++) {
+                        if (processos_ativos[j] && !processos_bloqueados[j]) {
+                            current_process = j;
+                            found = 1;
+                            break;
+                        }
+                    }
+                    if (!found) {
+                        printf("KernelSim: Nenhum processo disponível para executar.\n");
+                        fflush(stdout);
+                    }
+                }
+
+                // Remover o processo da fila de I/O se estiver presente
+                int new_fila_io[NUM_PROCESSES];
+                int new_fila_io_inicio = 0;
+                int new_fila_io_fim = 0;
+                while (fila_io_inicio != fila_io_fim) {
+                    int idx = dequeue_io();
+                    if (idx != i) {
+                        new_fila_io[new_fila_io_fim++] = idx;
+                    }
+                }
+                // Atualizar a fila de I/O
+                memcpy(fila_io, new_fila_io, sizeof(new_fila_io));
+                fila_io_inicio = 0;
+                fila_io_fim = new_fila_io_fim;
                 break;
             }
         }
@@ -238,9 +296,14 @@ int main() {
     sleep(1);
 
     // Ativar o primeiro processo
-    printf("KernelSim: Ativando processo %d com SIGCONT.\n", processos[current_process]);
-    fflush(stdout);
-    kill(processos[current_process], SIGCONT);
+    if (processos_ativos[current_process]) {
+        printf("KernelSim: Ativando processo %d com SIGCONT.\n", processos[current_process]);
+        fflush(stdout);
+        kill(processos[current_process], SIGCONT);
+    } else {
+        printf("KernelSim: Processo %d já terminou. Não será ativado.\n", processos[current_process]);
+        fflush(stdout);
+    }
 
     // Loop infinito para simular o KernelSim
     while (1) {

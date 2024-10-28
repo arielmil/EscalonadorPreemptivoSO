@@ -151,6 +151,9 @@ int main() {
     sprintf(filename, "pc_state_%d", getpid());
     unlink(filename);
 
+    // Pequena espera para garantir que sinais pendentes sejam processados
+    usleep(100000); // Espera 100ms
+
     // Sair do programa
     exit(0);
 }
